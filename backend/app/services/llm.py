@@ -1,0 +1,279 @@
+import json
+import re
+import asyncio
+from typing import Any, List, Dict, Callable, Optional
+from google import genai
+from app.config import settings
+from app.services.scraper import scrape_vendor_pages
+
+
+def _build_clients() -> List[genai.Client]:
+    keys = settings.gemini_api_keys
+    if not keys:
+        raise RuntimeError("No Gemini API keys configured. Set GEMINI_API_KEYS_RAW in .env")
+    return [genai.Client(api_key=k) for k in keys]
+
+
+_clients: List[genai.Client] = _build_clients()
+_BACKOFF_DELAYS = [0.0, 0.5, 1.0, 2.0]
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    msg = str(exc).upper()
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg or "QUOTA" in msg
+
+
+def _friendly_error(exc: Exception) -> str:
+    msg = str(exc)
+    if _is_quota_error(exc):
+        return "All API keys have reached their quota limit. Please wait a few minutes and try again."
+    if "JSON" in msg or "format" in msg.lower() or "unexpected" in msg.lower():
+        return "Gemini returned an unexpected response. Please try again with a clearer description."
+    if "network" in msg.lower() or "timeout" in msg.lower() or "connect" in msg.lower():
+        return "Network error while contacting Gemini. Please check your connection and try again."
+    clean = msg.split("\n")[0][:160]
+    return clean if clean else "Processing failed. Please try again."
+
+
+async def _generate(prompt: str) -> str:
+    last_exc: Optional[Exception] = None
+    for attempt, delay in enumerate(_BACKOFF_DELAYS):
+        if delay > 0:
+            await asyncio.sleep(delay)
+        for client in _clients:
+            try:
+                resp = client.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=prompt,
+                )
+                return resp.text
+            except Exception as exc:
+                if _is_quota_error(exc):
+                    last_exc = exc
+                    continue
+                raise
+    raise RuntimeError(
+        _friendly_error(last_exc) if last_exc
+        else "All Gemini API keys failed. Please try again later."
+    )
+
+
+def _extract_json(text: str) -> Any:
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if fence:
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+        m = re.search(pattern, text)
+        if m:
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _build_markdown(need: str, requirements: List[Dict], result: Dict) -> str:
+    lines = [
+        "# VendorLens — Shortlist Report",
+        f"\n## Need\n> {need}",
+        "\n## Requirements",
+    ]
+    for r in requirements:
+        lines.append(f"- **{r['text']}** (weight {r['weight']}/5)")
+
+    vendors = result.get("vendors", [])
+    if vendors:
+        lines.append("\n## Comparison Overview\n")
+        lines.append("| Vendor | Price Range | Match Score | Overall Score |")
+        lines.append("|--------|-------------|-------------|---------------|")
+        for v in vendors:
+            if not v.get("excluded"):
+                lines.append(
+                    f"| [{v['name']}]({v['website']}) | {v['priceRange']} "
+                    f"| {v.get('matchScore', 'N/A')}/100 | {v.get('overallScore', 'N/A')}/100 |"
+                )
+
+    lines.append("\n---\n## Detailed Vendor Analysis\n")
+    for v in vendors:
+        if v.get("excluded"):
+            continue
+        lines += [
+            f"### {v['name']}",
+            f"**Website:** <{v['website']}>",
+            f"**Price Range:** {v['priceRange']}",
+            f"**Match Score:** {v.get('matchScore', 'N/A')}/100",
+            f"**Overall Score:** {v.get('overallScore', 'N/A')}/100",
+            "",
+            "**Tags:** " + ", ".join(f"`{t}`" for t in v.get("tags", [])),
+            "",
+            "#### Requirement Analysis",
+        ]
+        for feat in v.get("matchedFeatures", []):
+            icon = "✅" if feat.get("satisfied") else "❌"
+            lines.append(f"- {icon} **{feat['requirement']}** (w:{feat.get('weight', 3)}): {feat['notes']}")
+        lines.append("\n#### Risks")
+        for risk in v.get("risks", []):
+            lines.append(f"- ⚠️ {risk}")
+        lines.append("\n#### Evidence")
+        for ev in v.get("evidenceLinks", []):
+            lines.append(f"- [{ev['url']}]({ev['url']})")
+            if ev.get("snippet"):
+                lines.append(f"  > {ev['snippet'][:200]}")
+        lines.append("")
+
+    lines += [
+        f"\n## Summary\n{result.get('summary', '')}",
+        f"\n## Recommendation\n{result.get('recommendation', '')}",
+        "\n---\n*Generated by VendorLens · Gemini 2.5 Flash*",
+    ]
+    return "\n".join(lines)
+
+
+async def generate_shortlist(
+    need: str,
+    requirements: List[Dict],
+    excluded_vendors: List[str] = [],
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Dict:
+    def progress(msg: str):
+        if on_progress:
+            on_progress(msg)
+
+    req_text = "\n".join(
+        f"  - {r['text']} (importance {r['weight']}/5)" for r in requirements
+    )
+    excl_note = (
+        f"\nDo NOT include these vendors: {', '.join(excluded_vendors)}."
+        if excluded_vendors else ""
+    )
+
+    progress("Identifying top vendors…")
+
+    vendor_prompt = f"""You are a vendor research assistant.
+
+User need: {need}
+
+Requirements:
+{req_text}
+{excl_note}
+
+Identify the BEST 4 real, reputable vendors/products that genuinely match this need.
+
+Selection rules:
+- Do NOT default to only the most famous/popular vendors. Evaluate actual fit.
+- Include regional and niche alternatives when they are cost-effective or specialised for the user's context (e.g. country, industry, budget).
+- If the user mentions cost, pricing, cheap, free, affordable, or low charges, prioritise vendors with the lowest real-world total cost of ownership — even if they are less well-known (e.g. Zoho, Mailersend, Postmark, regional payment gateways, etc.).
+- Ensure variety: do not pick 4 vendors from the same company family.
+
+Return ONLY a valid JSON array — no markdown, no commentary:
+
+[
+  {{
+    "name": "VendorName",
+    "website": "https://vendor.com",
+    "pricingUrl": "https://vendor.com/pricing",
+    "featuresUrl": "https://vendor.com/features"
+  }}
+]
+
+Use accurate, real URLs. Return only JSON."""
+
+    vendor_text = await _generate(vendor_prompt)
+    vendors_list: List[Dict] = _extract_json(vendor_text) or []
+    if not isinstance(vendors_list, list):
+        vendors_list = []
+
+    progress(f"Scraping pricing pages for {len(vendors_list)} vendors…")
+
+    scraped_data: Dict[str, str] = {}
+    for vendor in vendors_list[:4]:
+        name = vendor.get("name", "Unknown")
+        pages = await scrape_vendor_pages(vendor)
+        if pages:
+            combined = "\n\n".join(f"[From {p['url']}]\n{p['content']}" for p in pages)
+            scraped_data[name] = combined[:3500]
+        else:
+            scraped_data[name] = "(No web data — using AI knowledge only)"
+
+    progress("Analysing vendors against your requirements…")
+
+    comparison_prompt = f"""You are a senior technology analyst. Create a detailed vendor comparison.
+
+User need: {need}
+
+Requirements (weight 1-5, higher = more important):
+{req_text}
+
+Vendors to compare:
+{json.dumps(vendors_list, indent=2)}
+
+Scraped web data for each vendor:
+{json.dumps(scraped_data, indent=2)}
+
+Return ONLY valid JSON with EXACTLY this structure:
+{{
+  "vendors": [
+    {{
+      "name": "string",
+      "website": "https://...",
+      "priceRange": "e.g. Free – $99/mo (free tier: 10k units/mo)",
+      "matchedFeatures": [
+        {{
+          "requirement": "exact requirement text from the list above",
+          "satisfied": true,
+          "notes": "specific, concise notes using scraped data where available",
+          "weight": 3
+        }}
+      ],
+      "risks": ["Specific risk 1", "Specific risk 2"],
+      "evidenceLinks": [
+        {{
+          "url": "https://...",
+          "snippet": "Short quoted or paraphrased text from that page"
+        }}
+      ],
+      "overallScore": 85,
+      "matchScore": 90,
+      "tags": ["free-tier", "india-support", "open-source"],
+      "excluded": false
+    }}
+  ],
+  "summary": "2-3 sentence overall comparison summary",
+  "recommendation": "Specific recommendation referencing top-weighted requirements"
+}}
+
+Rules:
+- Include ALL {len(requirements)} requirements in matchedFeatures for EVERY vendor.
+- overallScore and matchScore are integers 0-100.
+- Be specific and accurate. Use scraped data for evidence snippets.
+- Return ONLY the JSON object. Nothing else."""
+
+    comparison_text = await _generate(comparison_prompt)
+    result = _extract_json(comparison_text)
+
+    if not result or not isinstance(result, dict) or "vendors" not in result:
+        raise ValueError("Gemini returned an unexpected response. Please try again.")
+
+    req_map = {r["text"].lower(): r["weight"] for r in requirements}
+    for vendor in result.get("vendors", []):
+        for feat in vendor.get("matchedFeatures", []):
+            feat["weight"] = req_map.get(feat.get("requirement", "").lower(), 3)
+
+    progress("Generating markdown report…")
+    result["markdownReport"] = _build_markdown(need, requirements, result)
+    return result
+
+
+async def check_llm_health() -> bool:
+    try:
+        await _generate("Respond with exactly one word: OK")
+        return True
+    except Exception:
+        return False

@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html {
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    color: #0a0a0a;
+    background: #ffffff;
+  }
+
+  input, textarea, select {
+    outline: none;
+  }
+
+  ::selection {
+    background: #fef9c3;
+    color: #0a0a0a;
+  }
+}
+
+@layer components {
+  /* ── Inputs ── */
+  .input-base {
+    @apply w-full border border-ink-300 rounded-md px-3 py-2.5 text-sm text-ink-950
+           placeholder-ink-400 transition-colors duration-150
+           focus:border-ink-900 focus:ring-1 focus:ring-ink-900
+           disabled:bg-ink-50 disabled:cursor-not-allowed;
+  }
+
+  /* ── Buttons ── */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 bg-ink-950 text-white text-sm font-semibold
+           px-4 py-2.5 rounded-md transition-all duration-150
+           hover:bg-ink-800 active:scale-[0.98]
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 bg-white text-ink-700 text-sm font-medium
+           border border-ink-300 px-4 py-2.5 rounded-md transition-all duration-150
+           hover:bg-ink-50 hover:border-ink-400 active:scale-[0.98]
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 text-ink-500 text-sm font-medium
+           px-3 py-1.5 rounded-md transition-colors duration-150
+           hover:text-ink-900 hover:bg-ink-100;
+  }
+
+  /* ── Cards ── */
+  .card {
+    @apply bg-white border border-ink-200 rounded-xl shadow-card;
+  }
+
+  /* ── Labels ── */
+  .label-xs {
+    @apply text-xs font-semibold tracking-wider uppercase text-ink-500;
+  }
+
+  /* ── Score badge ── */
+  .score-hi  { @apply bg-hi-100 text-hi-700 border border-hi-300; }
+  .score-mid { @apply bg-info-50 text-info-700 border border-info-200; }
+  .score-lo  { @apply bg-ink-100 text-ink-600 border border-ink-300; }
+}
+
+@layer utilities {
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4d4d4; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #a3a3a3; }

@@ -1,0 +1,17 @@
+{
+  "name": "VendorLens",
+  "short_name": "VendorLens",
+  "description": "AI-powered vendor discovery and comparison. Find the best vendors in seconds.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/vendor-lens-logo.png",
+      "sizes": "212x163",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
